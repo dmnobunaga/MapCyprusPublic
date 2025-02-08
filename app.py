@@ -2,6 +2,8 @@ import os
 import json
 import pickle
 import time
+import random
+from matplotlib.pyplot import show
 import streamlit as st
 from streamlit_folium import st_folium
 import folium
@@ -9,9 +11,10 @@ import geopandas as gpd
 import pandas as pd
 from shapely.geometry import Point
 from geopy.geocoders import Nominatim
-def wide_space_default():
-    st.set_page_config(layout="wide")
-wide_space_default()
+
+# Настройка страницы в широком режиме
+st.set_page_config(layout="wide")
+
 # Файл для кеширования результатов геокодирования
 CACHE_FILE = "./geocode_cache.json"
 
@@ -33,16 +36,22 @@ def get_geocode(query, geolocator, cache):
         try:
             location = geolocator.geocode(query, timeout=10)
             if location:
-                # Сохраняем только необходимые данные
                 result = {"latitude": location.latitude, "longitude": location.longitude}
                 cache[query] = result
-                # Обновляем кеш на диске
                 with open(CACHE_FILE, "w", encoding="utf-8") as f:
                     json.dump(cache, f, ensure_ascii=False, indent=2)
                 return result
         except Exception as e:
             st.error(f"Ошибка при поиске {query}: {e}")
     return None
+
+districts_en_el = {
+    "Famagusta": "Αμμοχώστου", 
+    "Larnaca" : "Λάρνακας", 
+    "Limassol": "Λεμεσού", 
+    "Nicosia" : "Λευκωσίας",
+    "Paphos" : "Πάφος"
+}
 
 # Словарь с районами и списками деревень на Кипре
 villages = {
@@ -404,113 +413,101 @@ villages = {
         "Φρέναρος"
     ]
 }
+clicked_district = None
+isDialog = False
 
-if os.path.exists("map.pickle"):
-    with open("map.pickle", "rb") as f:
-        m = pickle.load(f)
+# Загружаем или создаем список вопросов (вопрос = словарь с деревней и правильным дистриктом)
+QUESTIONS_FILE = "./questions.pickle"
+if os.path.exists(QUESTIONS_FILE):
+    with open(QUESTIONS_FILE, "rb") as f:
+        questions = pickle.load(f)
 else:
-    # Инициализируем геокодер
-    geolocator = Nominatim(user_agent="cyprus_map_app")
-
-    # Список для хранения данных: каждый элемент – словарь с названием, районом, координатами
-    data = []
-
-    st.title("Карта Кипра с отмеченными деревнями")
-
+    questions = []
     for district, village_list in villages.items():
         for village in village_list:
-            query = f"{village}, {district}, Cyprus"
-            result = get_geocode(query, geolocator, geocode_cache)
-            if result:
-                data.append({
-                    "village": village,
-                    "district": district,
-                    "latitude": result["latitude"],
-                    "longitude": result["longitude"]
-                })
-                st.write(f"Найдено: **{query}** -> {result['latitude']}, {result['longitude']}")
-            else:
-                st.write(f"Не найдено: **{query}**")
-                with open("not_found.txt", "a", encoding="utf-8") as f:
-                    f.write(f"{query}\n")
+            questions.append({"village": village, "district": district})
+    random.shuffle(questions)
+    with open(QUESTIONS_FILE, "wb") as f:
+        pickle.dump(questions, f)
 
-    # Создаем DataFrame из полученных данных
-    df = pd.DataFrame(data)
+# Сохраняем вопросы в session_state, если еще не сохранены
+if "questions" not in st.session_state:
+    st.session_state.questions = questions
+    st.session_state.question_index = 0
+    st.session_state.score = 0
+st.title("Викторина: Найди дистрикт для деревни")
 
-    # Преобразуем DataFrame в GeoDataFrame (геометрия точек)
-    geometry = [Point(xy) for xy in zip(df['longitude'], df['latitude'])]
-    villages_gdf = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:4326")
+# Сайдбар для выбора размеров карты (адаптивность)
+map_width = 500
+map_height = 500
 
-    # Загрузка shapefile Кипра (обновите путь к файлу, например, используйте .shp)
+# ... (предыдущий код без изменений)
+
+@st.dialog("Answer")
+def show_answer(clicked_district):
+    st.markdown(
+        """
+        <style>
+        /* Скрываем кнопку закрытия диалога (крестик) */
+        div[aria-label="dialog"] > button[aria-label="Close"] {
+            display: none;
+        }
+        /* Отключаем клики по затемненному фону (оверлею) */
+        div[data-baseweb="modal"] {
+            pointer-events: none !important;
+        }
+        /* Обеспечиваем, чтобы само диалоговое окно оставалось кликабельным */
+        div[aria-label="dialog"] {
+            pointer-events: auto;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    current_question = st.session_state.questions[st.session_state.question_index]
+    
+    st.write(f"Вы выбрали дистрикт: **{clicked_district}**")
+    
+    # Проверяем правильность ответа
+    if districts_en_el.get(clicked_district.strip(), "").lower() == current_question["district"].strip().lower():
+        st.success(f"✅ Правильно! {current_question["district"].strip().lower()}" )
+        st.session_state.score += 1
+    else:
+        st.error(f"❌ Неверно. Правильный ответ: **{current_question['district']}**")
+        
+    # Кнопка для следующего вопроса
+    if st.button("Следующий вопрос", key=f"next_{st.session_state.question_index}"):
+        # Сбрасываем состояние диалога и клика
+        st.session_state.question_index += 1
+        st.session_state.isDialog = False
+        if "last_clicked" in st.session_state:
+            del st.session_state.last_clicked
+        st.rerun()
+
+
+if st.session_state.question_index < len(st.session_state.questions):
+    current_question = st.session_state.questions[st.session_state.question_index]
+    st.header(f"Вопрос {st.session_state.question_index+1}: {current_question['village']}")
+    
+    # Создание карты
+    m = folium.Map(location=[35.0, 33.0], zoom_start=8.4)
     SHAPEFILE_PATH = "./cyprus_Districts_level_1.shp"
     cyprus_gdf = gpd.read_file(SHAPEFILE_PATH)
+    folium.GeoJson(cyprus_gdf.to_json()).add_to(m)
+    
+    # Обработка кликов
+    map_data = st_folium(m, width=map_width, height=map_height, key=f"map_{st.session_state.question_index}")
+    
+    if map_data.get("last_clicked") and not st.session_state.get("isDialog"):
+        # Сохраняем информацию о клике в session_state
+        st.session_state.last_clicked = map_data["last_clicked"]
+        st.session_state.last_active_drawing = map_data["last_active_drawing"]
+        
+        # Определяем выбранный дистрикт
+        clicked_district = st.session_state.last_active_drawing["properties"]["shape1"]
+        st.session_state.isDialog = True
+        show_answer(clicked_district)
 
-    # Если системы координат не совпадают, преобразуем GeoDataFrame деревень
-    if cyprus_gdf.crs != villages_gdf.crs:
-        villages_gdf = villages_gdf.to_crs(cyprus_gdf.crs)
-
-    # Создаем folium-карту с центром на Кипре (примерно)
-    m = folium.Map(location=[35.0, 33.0], zoom_start=8)
-
-    # Добавляем контур Кипра из shapefile
-    folium.GeoJson(cyprus_gdf.to_json(), name="Контур Кипра").add_to(m)
-
-    # Добавляем маркеры для деревень
-    for idx, row in villages_gdf.iterrows():
-        folium.CircleMarker(
-            location=[row["latitude"], row["longitude"]],
-            radius=3,
-            color='red',
-            fill=True,
-            fill_color='red',
-            popup=f"{row['village']} ({row['district']})"
-        ).add_to(m)
-    with open("map.pickle", "wb") as f:
-        pickle.dump(m, f)
-
-folium.LayerControl().add_to(m)
-st.markdown(
-    """
-    <style>
-    .stApp {
-        opacity: 1 !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    """
-    <style>
-    /* Try targeting the st_folium container element.
-       Adjust the selector if necessary by inspecting your app’s HTML. */
-    .st-folium, 
-    .st-folium-container, 
-    .st-folium-container iframe {
-        transition: none !important;
-        opacity: 1 !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-st.markdown(
-    """
-    <style>
-    /* Target elements with class names starting with 'st-emotion-cache-' */
-    [class^="st-emotion-cache-"] {
-        opacity: 1 !important;
-        transition: none !important;
-    } 
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-st.markdown("""
-<style>
-[data-baseweb="tab-panel"], [data-baseweb="tab-panel"], * {opacity:100% !important;}
-</style>
-""", unsafe_allow_html=True)
-st.subheader("Интерактивная карта")
-st_folium(m, width=1920, height=1080)
+else:
+    st.success(f"🎉 Викторина завершена! Правильных ответов: {st.session_state.score}/{len(questions)}")
